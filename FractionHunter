@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fraction Hunter – WebXR (Three.js)</title>
+  <style>
+    html, body { margin:0; padding:0; height:100%; overflow:hidden; font-family: system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial; }
+    #ui { position:fixed; top:12px; left:12px; right:12px; display:flex; gap:12px; align-items:center; pointer-events:none; z-index:10; }
+    .pill { background:#000a; color:#fff; padding:8px 12px; border-radius:999px; font-weight:600; letter-spacing:.2px; pointer-events:auto }
+    #goal { background:#2563eb; }
+    #score { background:#16a34a; }
+    #timer { background:#ef4444; }
+    #level { background:#6b7280; }
+    #btnStart, #btnNext { position:fixed; inset:auto auto 24px 50%; transform:translateX(-50%); padding:12px 18px; background:#111; color:#fff; border:0; border-radius:12px; font-weight:700; cursor:pointer; z-index:10 }
+    #help { position:fixed; right:12px; bottom:12px; background:#000a; color:#fff; padding:10px 12px; border-radius:12px; line-height:1.4; max-width:340px; backdrop-filter: blur(6px); }
+    #overlay { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background:linear-gradient(180deg,#0b1020,#000); color:#fff; text-align:center; z-index:20; }
+    #overlay.hidden{ display:none; }
+    #overlay .card { max-width:680px; padding:28px; border-radius:18px; background:#0b1020cc; box-shadow: 0 10px 40px #0008; }
+    #overlay h1 { margin:0 0 10px; font-size:28px; }
+    #overlay p { opacity:.9 }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <div id="goal" class="pill">เป้าหมาย: —</div>
+    <div id="score" class="pill">คะแนน: 0</div>
+    <div id="timer" class="pill">เวลา: 60</div>
+    <div id="level" class="pill">ด่าน: 1</div>
+  </div>
+  <button id="btnStart">เริ่มเกม / Enter VR</button>
+  <button id="btnNext" style="display:none">ด่านต่อไป ▶</button>
+  <div id="help">
+    <b>วิธีเล่น</b><br>
+    เดสก์ท็อป: คลิกซ้ายยิงวัตถุที่ "คำตอบถูกต้อง"<br>
+    VR: ใช้คอนโทรลเลอร์ชี้ & กดทริกเกอร์<br>
+    เคล็ดลับ: เก็บเป้าหมายให้ครบเพื่อผ่านด่าน!
+  </div>
+  <div id="overlay" class="">
+    <div class="card">
+      <h1>Fraction Hunter</h1>
+      <p>เกมล่าเศษส่วนแบบ WebXR – เหมาะสำหรับ ป.ปลาย–ม.ต้น<br>จงยิง/เก็บวัตถุที่มีค่าเท่ากับโจทย์ทางคณิต (เช่น <i>1/2 ของ 8</i> = 4)</p>
+      <p>คลิกปุ่มด้านล่างเพื่อเริ่ม และสามารถเข้าโหมด VR ได้ด้วยปุ่มจากเบราว์เซอร์ (รองรับ Quest ฯลฯ)</p>
+    </div>
+  </div>
+  
+  <script type="module">
+    import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+    import { OrbitControls } from 'https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js';
+    import { VRButton } from 'https://unpkg.com/three@0.160.0/examples/jsm/webxr/VRButton.js';
+
+    // ====== Core setup ======
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0b1020);
+
+    const camera = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, 0.1, 200);
+    camera.position.set(0, 1.6, 3.5);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.xr.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    const light = new THREE.DirectionalLight(0xffffff, 2);
+    light.position.set(3,5,2);
+    scene.add(light, new THREE.AmbientLight(0xffffff, 0.6));
+
+    // Ground grid
+    const grid = new THREE.GridHelper(40, 40, 0x224488, 0x112244);
+    grid.position.y = 0;
+    scene.add(grid);
+
+    // Controls (desktop)
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.target.set(0, 1.6, 0);
+
+    // VR button
+    document.body.appendChild(VRButton.createButton(renderer));
+
+    // ====== UI ======
+    const ui = {
+      goal: document.getElementById('goal'),
+      score: document.getElementById('score'),
+      timer: document.getElementById('timer'),
+      level: document.getElementById('level'),
+      overlay: document.getElementById('overlay'),
+      btnStart: document.getElementById('btnStart'),
+      btnNext: document.getElementById('btnNext'),
+    };
+
+    // ====== Gameplay state ======
+    const state = {
+      level: 1,
+      score: 0,
+      timeLeft: 60,
+      requiredHits: 5, // collect N correct targets to clear a level
+      currentHits: 0,
+      roundActive: false,
+      goalText: '',
+      goalAnswer: 0,
+    };
+
+    // ====== Utility: make text texture ======
+    function makeLabelTexture(text, { size=128, fg='#ffffff', bg='#00000088' }={}){
+      const canvas = document.createElement('canvas');
+      canvas.width = size*2; canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = bg; ctx.fillRect(0,0,canvas.width,canvas.height);
+      ctx.fillStyle = fg; ctx.font = `${Math.floor(size*0.6)}px system-ui, Arial`; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText(text, canvas.width/2, canvas.height/2);
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.encoding = THREE.sRGBEncoding;
+      return tex;
+    }
+
+    // ====== Target factory ======
+    const targetGroup = new THREE.Group();
+    scene.add(targetGroup);
+
+    function spawnTargets(answer, level){
+      clearTargets();
+      const count = 10;
+      const answers = new Set([answer]);
+      function randInt(a,b){ return Math.floor(Math.random()*(b-a+1))+a }
+
+      // generate decoys around the answer
+      while(answers.size < 1 + Math.min(6, 3+level)){
+        const delta = randInt(-5- level, 5+ level);
+        const candidate = Math.max(0, answer + delta);
+        answers.add(candidate);
+      }
+
+      const list = Array.from(answers).sort(()=>Math.random()-0.5);
+      for(let i=0;i<count;i++){
+        const val = list[i % list.length];
+        const box = new THREE.Mesh(
+          new THREE.BoxGeometry(0.45,0.45,0.45),
+          new THREE.MeshStandardMaterial({ color: (val===answer?0x22c55e:0x334155), roughness:.6, metalness:.1 })
+        );
+        box.position.set((Math.random()*2-1)*3.2, 1 + Math.random()*2.2, - (1.5 + Math.random()*4));
+        box.userData = { value: val, isCorrect: val===answer };
+
+        // label
+        const label = new THREE.Mesh(
+          new THREE.PlaneGeometry(0.6,0.3),
+          new THREE.MeshBasicMaterial({ map: makeLabelTexture(String(val)), transparent:true })
+        );
+        label.position.set(0, 0.5, 0);
+        box.add(label);
+
+        // float animation factors
+        box.userData.floatPhase = Math.random()*Math.PI*2;
+        targetGroup.add(box);
+      }
+    }
+
+    function clearTargets(){
+      for(let i=targetGroup.children.length-1; i>=0; i--){
+        const o = targetGroup.children[i];
+        targetGroup.remove(o);
+        o.traverse((n)=>{ if(n.material && n.material.map && n.material.map.dispose) n.material.map.dispose(); if(n.material && n.material.dispose) n.material.dispose(); if(n.geometry && n.geometry.dispose) n.geometry.dispose(); });
+      }
+    }
+
+    // ====== Problem generator ======
+    // Returns { text, answer }
+    function makeProblem(level){
+      // cycle between: fraction-of-integer, simplify fraction equals?, and mixed ratio percent
+      const mode = (level % 3);
+      function randInt(a,b){ return Math.floor(Math.random()*(b-a+1))+a }
+
+      if(mode===1){
+        // Fraction of an integer, e.g., 1/2 of 8
+        const denom = randInt(2, 9);
+        let numer = randInt(1, denom-1);
+        const whole = randInt(4, 20);
+        const g = (a,b)=> b?g(b,a%b):a; // gcd
+        const gcd = g(numer, denom); numer/=gcd; const d=denom/gcd;
+        const answer = Math.floor(whole * (numer/d));
+        return { text:`หา ${numer}/${d} ของ ${whole}`, answer };
+      } else if(mode===2){
+        // Percentage of a number, e.g., 25% of 60
+        const pct = [10,20,25,30,40,50,60,75][randInt(0,7)];
+        const n = randInt(20, 120);
+        const answer = Math.round(n * (pct/100));
+        return { text:`หา ${pct}% ของ ${n}`, answer };
+      } else {
+        // Equivalent fraction to a simple decimal (rounded), e.g., equals 0.5
+        const pairs = [ [1,2,0.5], [3,4,0.75], [2,5,0.4], [1,4,0.25], [5,8,0.625] ];
+        const [a,b,dec] = pairs[randInt(0,pairs.length-1)];
+        const scale = randInt(1,4);
+        const numer = a*scale, denom = b*scale;
+        const base = randInt(4, 30);
+        // Ask: find value equal to a/b of base
+        const answer = Math.round(base * (a/b));
+        return { text:`หา ${a}/${b} ของ ${base}`, answer };
+      }
+    }
+
+    // ====== Raycasting (desktop + VR) ======
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+
+    function onClick(){
+      if(renderer.xr.isPresenting) return; // in desktop-only click when not in VR
+      mouse.set(0,0); // center screen cast (FPS-like) for simplicity
+      raycaster.setFromCamera(mouse, camera);
+      handleRaycast(raycaster.ray);
+    }
+
+    function handleRaycastRay(ray){
+      raycaster.ray.copy(ray);
+      const hits = raycaster.intersectObjects(targetGroup.children, true);
+      if(hits.length===0) return;
+      const first = hits[0].object; // might be label; ascend to box
+      const box = first.userData.value!==undefined ? first : first.parent;
+      evaluateHit(box);
+    }
+
+    function handleRaycast(ray){
+      // compat wrapper when using camera center
+      handleRaycastRay(ray);
+    }
+
+    window.addEventListener('click', onClick);
+
+    // VR controller
+    const controller = renderer.xr.getController(0);
+    scene.add(controller);
+    const controllerGeom = new THREE.Mesh(new THREE.ConeGeometry(0.005, 0.1, 16), new THREE.MeshBasicMaterial({color:0xffffff}));
+    controllerGeom.rotation.x = -Math.PI/2;
+    controller.add(controllerGeom);
+
+    controller.addEventListener('selectstart', ()=> { // trigger pressed
+      const tempMatrix = new THREE.Matrix4();
+      tempMatrix.identity().extractRotation(controller.matrixWorld);
+      const origin = new THREE.Vector3();
+      origin.setFromMatrixPosition(controller.matrixWorld);
+      const direction = new THREE.Vector3(0,0,-1).applyMatrix4(tempMatrix);
+      const ray = new THREE.Ray(origin, direction);
+      raycaster.ray.copy(ray);
+      handleRaycastRay(ray);
+    });
+
+    // ====== Evaluate hit ======
+    function evaluateHit(box){
+      if(!state.roundActive) return;
+      const { isCorrect, value } = box.userData;
+      // pop animation
+      const start = performance.now();
+      const startScale = box.scale.clone();
+      const pop = ()=>{
+        const t = (performance.now() - start)/200;
+        if(t<1){
+          const s = 1 - t; box.scale.set(startScale.x*s, startScale.y*s, startScale.z*s);
+          requestAnimationFrame(pop);
+        } else {
+          targetGroup.remove(box);
+        }
+      };
+      requestAnimationFrame(pop);
+
+      if(isCorrect){
+        state.score += 10;
+        state.currentHits += 1;
+        ui.score.textContent = `คะแนน: ${state.score}`;
+        if(state.currentHits >= state.requiredHits){
+          endLevel(true);
+        }
+      } else {
+        state.score = Math.max(0, state.score - 5);
+        ui.score.textContent = `คะแนน: ${state.score}`;
+      }
+    }
+
+    // ====== Level control ======
+    let timerHandle = null;
+
+    function startLevel(){
+      state.roundActive = true;
+      state.currentHits = 0;
+      state.timeLeft = Math.max(35, 60 - (state.level-1)*3);
+      ui.level.textContent = `ด่าน: ${state.level}`;
+      ui.timer.textContent = `เวลา: ${state.timeLeft}`;
+
+      const p = makeProblem(state.level);
+      state.goalText = p.text; state.goalAnswer = p.answer;
+      ui.goal.textContent = `เป้าหมาย: ${state.goalText}`;
+
+      spawnTargets(state.goalAnswer, state.level);
+
+      clearInterval(timerHandle);
+      timerHandle = setInterval(()=>{
+        if(!state.roundActive) return;
+        state.timeLeft -= 1;
+        ui.timer.textContent = `เวลา: ${state.timeLeft}`;
+        if(state.timeLeft<=0){ endLevel(false); }
+      }, 1000);
+    }
+
+    function endLevel(win){
+      state.roundActive = false;
+      clearInterval(timerHandle);
+      ui.btnNext.style.display = 'block';
+      ui.btnNext.textContent = win ? 'ด่านต่อไป ▶' : 'ลองใหม่อีกครั้ง ▶';
+    }
+
+    ui.btnStart.addEventListener('click', ()=>{
+      ui.overlay.classList.add('hidden');
+      ui.btnStart.style.display = 'none';
+      startLevel();
+    });
+
+    ui.btnNext.addEventListener('click', ()=>{
+      if(state.timeLeft<=0){ // lost
+        // keep level but allow retry
+      } else {
+        state.level += 1; // next level on win
+        // increase difficulty slightly
+        state.requiredHits = Math.min(9, 5 + Math.floor(state.level/2));
+      }
+      ui.btnNext.style.display = 'none';
+      startLevel();
+    });
+
+    // ====== Animate ======
+    const clock = new THREE.Clock();
+    function animate(){
+      const t = clock.getElapsedTime();
+      // float targets
+      for(const b of targetGroup.children){
+        const p = b.userData.floatPhase || 0;
+        b.position.y += Math.sin(t + p) * 0.0025;
+        b.rotation.y += 0.01;
+      }
+      controls.update();
+      renderer.render(scene, camera);
+    }
+    renderer.setAnimationLoop(animate);
+
+    // Resize
+    addEventListener('resize', ()=>{
+      camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+  </script>
+</body>
+</html>
